@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"path/filepath"
 	"sync"
@@ -212,15 +213,10 @@ func (b *WriteBatch) Delete(key []byte) {
 	b.ops = append(b.ops, writeOp{key: key, value: []byte{}})
 }
 
-// Write applies all operations of b under one lock at a single commit timestamp:
-// each op is encoded with that timestamp, logged to the WAL, and inserted.
-func (s *Storage) Write(b *WriteBatch) error {
+// writeEncodedBatch applies entries (encoded keys) to the active memtable under
+// the engine lock, freezing if the memtable is full.
+func (s *Storage) writeEncodedBatch(entries []memtable.Entry) error {
 	s.mu.Lock()
-	commitTs := s.mvcc.nextTs()
-	entries := make([]memtable.Entry, len(b.ops))
-	for i, op := range b.ops {
-		entries[i] = memtable.Entry{Key: key.Encode(op.key, commitTs), Value: op.value}
-	}
 	if err := s.st.memtable.PutBatch(entries); err != nil {
 		s.mu.Unlock()
 		return err
@@ -230,6 +226,27 @@ func (s *Storage) Write(b *WriteBatch) error {
 	if full {
 		return s.ForceFreezeMemtable()
 	}
+	return nil
+}
+
+// Write applies a batch atomically at a fresh commit timestamp. It serializes
+// with transaction commits and records its write set so open transactions detect
+// conflicts against it.
+func (s *Storage) Write(b *WriteBatch) error {
+	s.mvcc.commitMu.Lock()
+	defer s.mvcc.commitMu.Unlock()
+	commitTs := s.mvcc.nextTs()
+	entries := make([]memtable.Entry, len(b.ops))
+	writeSet := make(map[uint64]struct{}, len(b.ops))
+	for i, op := range b.ops {
+		entries[i] = memtable.Entry{Key: key.Encode(op.key, commitTs), Value: op.value}
+		writeSet[hashKey(op.key)] = struct{}{}
+	}
+	if err := s.writeEncodedBatch(entries); err != nil {
+		return err
+	}
+	s.mvcc.recordCommitted(commitTs, writeSet)
+	s.mvcc.pruneCommitted()
 	return nil
 }
 
@@ -245,6 +262,13 @@ func (s *Storage) Delete(k []byte) error {
 	b := &WriteBatch{}
 	b.Delete(k)
 	return s.Write(b)
+}
+
+// hashKey hashes a user key for transaction conflict tracking.
+func hashKey(userKey []byte) uint64 {
+	h := fnv.New64a()
+	h.Write(userKey)
+	return h.Sum64()
 }
 
 func seekSST(sst *sstable.SsTable, lower []byte) (iterator.StorageIterator, error) {
