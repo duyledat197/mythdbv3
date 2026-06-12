@@ -7,6 +7,8 @@ import (
 	"sync"
 
 	"mythdb/internal/iterator"
+	"mythdb/internal/key"
+	"mythdb/internal/memtable"
 )
 
 // ErrSerialization is returned by Commit when a serialization conflict is found.
@@ -103,6 +105,60 @@ func (t *Txn) recordRead(userKey []byte) {
 	t.mu.Lock()
 	t.accessSet[hashKey(userKey)] = struct{}{}
 	t.mu.Unlock()
+}
+
+// Commit validates the transaction against newer committers (serializable
+// snapshot isolation) and, if it passes, applies its buffered writes atomically
+// at a fresh commit timestamp.
+func (t *Txn) Commit() error {
+	mvccc := t.engine.mvcc
+	mvccc.commitMu.Lock()
+	defer mvccc.commitMu.Unlock()
+
+	t.mu.Lock()
+	if t.done {
+		t.mu.Unlock()
+		return errors.New("lsm: transaction already finished")
+	}
+	access := t.accessSet
+	writeSet := make(map[uint64]struct{}, len(t.local))
+	entriesKV := make([][2][]byte, 0, len(t.local))
+	for k, v := range t.local {
+		writeSet[hashKey([]byte(k))] = struct{}{}
+		entriesKV = append(entriesKV, [2][]byte{[]byte(k), v})
+	}
+	t.done = true
+	t.mu.Unlock()
+
+	// SSI: abort if a transaction that committed after our snapshot wrote a key we
+	// accessed (read or wrote).
+	if mvccc.hasConflict(t.readTs, access) {
+		mvccc.removeReader(t.readTs)
+		return ErrSerialization
+	}
+
+	// Nothing to write: a read-only transaction just releases its reader.
+	if len(entriesKV) == 0 {
+		mvccc.removeReader(t.readTs)
+		mvccc.pruneCommitted()
+		return nil
+	}
+
+	commitTs := mvccc.nextTs()
+	entries := make([]memtable.Entry, len(entriesKV))
+	for i, kv := range entriesKV {
+		entries[i] = memtable.Entry{Key: key.Encode(kv[0], commitTs), Value: kv[1]}
+	}
+	if err := t.engine.writeEncodedBatch(entries); err != nil {
+		// The write failed; the reader is still removed so we do not stall the
+		// watermark, but the commit did not take effect.
+		mvccc.removeReader(t.readTs)
+		return err
+	}
+	mvccc.recordCommitted(commitTs, writeSet)
+	mvccc.removeReader(t.readTs)
+	mvccc.pruneCommitted()
+	return nil
 }
 
 // Rollback abandons the transaction.
