@@ -79,14 +79,30 @@ func (m *Memtable) WALPath() string { return m.walPath }
 
 // Put logs to the WAL (if present) then inserts or overwrites key with value.
 func (m *Memtable) Put(k, v []byte) error {
+	return m.PutBatch([]Entry{{Key: k, Value: v}})
+}
+
+// Entry is one key/value pair for a batch write.
+type Entry struct {
+	Key, Value []byte
+}
+
+// PutBatch logs every entry to the WAL (if present) and only then applies them
+// to the skiplist, so a WAL write error leaves the in-memory table unchanged
+// (no partial batch is visible to readers).
+func (m *Memtable) PutBatch(entries []Entry) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.wal != nil {
-		if err := m.wal.Put(k, v); err != nil {
-			return err
+		for _, e := range entries {
+			if err := m.wal.Put(e.Key, e.Value); err != nil {
+				return err
+			}
 		}
 	}
-	m.apply(k, v)
+	for _, e := range entries {
+		m.apply(e.Key, e.Value)
+	}
 	return nil
 }
 

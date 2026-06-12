@@ -203,12 +203,14 @@ func (b *WriteBatch) Delete(key []byte) {
 // Write applies all operations of b under one lock: each is logged to the active
 // memtable's WAL then inserted, so no reader observes a partial batch.
 func (s *Storage) Write(b *WriteBatch) error {
+	entries := make([]memtable.Entry, len(b.ops))
+	for i, op := range b.ops {
+		entries[i] = memtable.Entry{Key: op.key, Value: op.value}
+	}
 	s.mu.Lock()
-	for _, op := range b.ops {
-		if err := s.st.memtable.Put(op.key, op.value); err != nil {
-			s.mu.Unlock()
-			return err
-		}
+	if err := s.st.memtable.PutBatch(entries); err != nil {
+		s.mu.Unlock()
+		return err
 	}
 	full := s.st.memtable.ApproximateSize() >= s.opts.TargetSSTSize
 	s.mu.Unlock()

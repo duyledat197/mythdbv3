@@ -83,7 +83,21 @@ func (b *Builder) Build(id int, path string) (*SsTable, error) {
 	binary.LittleEndian.PutUint32(off4, uint32(bloomOffset))
 	buf = append(buf, off4...)
 
-	if err := os.WriteFile(path, buf, 0o644); err != nil {
+	// Write and fsync the file so it is durable before any manifest record
+	// (e.g. a flush) can reference it.
+	wf, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := wf.Write(buf); err != nil {
+		wf.Close()
+		return nil, err
+	}
+	if err := wf.Sync(); err != nil {
+		wf.Close()
+		return nil, err
+	}
+	if err := wf.Close(); err != nil {
 		return nil, err
 	}
 	f, err := os.Open(path)
