@@ -2,6 +2,7 @@ package sstable
 
 import (
 	"encoding/binary"
+	"hash/crc32"
 	"os"
 
 	"mythdb/internal/block"
@@ -67,8 +68,12 @@ func (b *Builder) Build(id int, path string) (*SsTable, error) {
 	buf := append([]byte(nil), b.data...)
 
 	metaOffset := len(buf)
-	buf = append(buf, encodeBlockMeta(b.meta)...)
+	metaBytes := encodeBlockMeta(b.meta)
+	buf = append(buf, metaBytes...)
 	off4 := make([]byte, 4)
+	// meta-section checksum, then the meta offset.
+	binary.LittleEndian.PutUint32(off4, crc32.ChecksumIEEE(metaBytes))
+	buf = append(buf, off4...)
 	binary.LittleEndian.PutUint32(off4, uint32(metaOffset))
 	buf = append(buf, off4...)
 

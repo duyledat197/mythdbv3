@@ -3,6 +3,7 @@ package sstable
 import (
 	"encoding/binary"
 	"fmt"
+	"hash/crc32"
 	"os"
 	"sort"
 
@@ -35,7 +36,7 @@ func Open(id int, path string) (*SsTable, error) {
 		return nil, err
 	}
 	size := info.Size()
-	if size < 8 {
+	if size < 12 {
 		f.Close()
 		return nil, fmt.Errorf("sstable: file too small")
 	}
@@ -71,10 +72,20 @@ func Open(id int, path string) (*SsTable, error) {
 		return nil, err
 	}
 	metaOff := int64(binary.LittleEndian.Uint32(metaOffBuf))
-	metaBuf, err := read(metaOff, (bloomOff-4)-metaOff)
+	metaCRCBuf, err := read(bloomOff-8, 4)
 	if err != nil {
 		f.Close()
 		return nil, err
+	}
+	wantMetaCRC := binary.LittleEndian.Uint32(metaCRCBuf)
+	metaBuf, err := read(metaOff, (bloomOff-8)-metaOff)
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	if crc32.ChecksumIEEE(metaBuf) != wantMetaCRC {
+		f.Close()
+		return nil, fmt.Errorf("sstable: meta checksum mismatch")
 	}
 	metas, err := decodeBlockMeta(metaBuf)
 	if err != nil {
