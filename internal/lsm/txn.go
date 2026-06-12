@@ -134,6 +134,7 @@ func (t *Txn) Commit() error {
 	// accessed (read or wrote).
 	if mvccc.hasConflict(t.readTs, access) {
 		mvccc.removeReader(t.readTs)
+		mvccc.pruneCommitted()
 		return ErrSerialization
 	}
 
@@ -153,6 +154,7 @@ func (t *Txn) Commit() error {
 		// The write failed; the reader is still removed so we do not stall the
 		// watermark, but the commit did not take effect.
 		mvccc.removeReader(t.readTs)
+		mvccc.pruneCommitted()
 		return err
 	}
 	mvccc.recordCommitted(commitTs, writeSet)

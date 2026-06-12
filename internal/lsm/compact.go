@@ -13,9 +13,12 @@ import (
 	"mythdb/internal/sstable"
 )
 
-// doCompact merges the given input SST ids (ordered newest-first) into new
-// SSTs, splitting by the target SST size. When toBottomLevel is true, entries
-// with an empty value (tombstones) are dropped.
+// doCompact merges the given input SST ids (ordered newest-first) into new SSTs,
+// splitting by the target SST size. Above the bottom level every version is kept.
+// At the bottom level (toBottomLevel) it garbage-collects by the watermark: it
+// keeps every version with ts > watermark plus the newest version with
+// ts <= watermark, dropping older versions; if that newest <=watermark version is
+// a tombstone it is reclaimed too (nothing below the bottom level needs it).
 func (s *Storage) doCompact(inputIDs []int, toBottomLevel bool, watermark uint64) ([]*sstable.SsTable, error) {
 	st := s.snapshot()
 

@@ -74,3 +74,31 @@ func TestTxnNonConflictingCommit(t *testing.T) {
 		t.Fatalf("disjoint txn should commit, got %v", err)
 	}
 }
+
+func TestTxnScanReadConflictAborts(t *testing.T) {
+	s := newTxnStorage(t)
+	s.Put([]byte("a"), []byte("0"))
+	s.Put([]byte("b"), []byte("0"))
+
+	t1 := s.Begin()
+	// t1 scans the range [a, c), recording a read set covering a and b.
+	it, err := t1.Scan([]byte("a"), []byte("c"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for it.IsValid() {
+		it.Next()
+	}
+	t1.Put([]byte("x"), []byte("derived"))
+
+	// t2 writes b (which t1 read via the scan) and commits first.
+	t2 := s.Begin()
+	t2.Put([]byte("b"), []byte("1"))
+	if err := t2.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	// t1's scan read set (b) intersects t2's write set (b) -> abort.
+	if err := t1.Commit(); !errors.Is(err, ErrSerialization) {
+		t.Fatalf("t1 commit should abort (scan read-write conflict), got %v", err)
+	}
+}
