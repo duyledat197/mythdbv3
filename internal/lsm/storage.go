@@ -3,6 +3,7 @@ package lsm
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"mythdb/internal/compaction"
 	"mythdb/internal/iterator"
 	"mythdb/internal/key"
+	"mythdb/internal/manifest"
 	"mythdb/internal/memtable"
 	"mythdb/internal/sstable"
 )
@@ -21,6 +23,8 @@ type Options struct {
 	TargetSSTSize int64  // memtable freeze threshold AND target compaction SST size
 
 	Compaction CompactionOptions
+
+	SyncWrites bool // fsync each WAL write (durable but slow); default off
 }
 
 // CompactionOptions configures background compaction. Strategy "" disables it.
@@ -53,12 +57,14 @@ type Storage struct {
 	nextID int
 
 	controller compaction.Controller
+	manifest   *manifest.Manifest
 
 	stopCh chan struct{}
 	wg     sync.WaitGroup
 }
 
-// Open initializes an empty engine. (Recovery from disk arrives in Week 2B.)
+// Open initializes the engine. (Task 6 adds recovery from an existing MANIFEST;
+// this version always starts fresh, creating the manifest and first WAL.)
 func Open(opts Options) (*Storage, error) {
 	if opts.BlockSize == 0 {
 		opts.BlockSize = 4096
@@ -70,15 +76,28 @@ func Open(opts Options) (*Storage, error) {
 	s := &Storage{opts: opts, nextID: 1}
 	s.controller = buildController(opts.Compaction)
 
+	if err := os.MkdirAll(opts.Path, 0o755); err != nil {
+		return nil, err
+	}
+	man, err := manifest.Create(filepath.Join(opts.Path, "MANIFEST"))
+	if err != nil {
+		return nil, err
+	}
+	s.manifest = man
+
+	mt, err := memtable.NewWithWAL(0, s.walPath(0), opts.SyncWrites)
+	if err != nil {
+		return nil, err
+	}
 	var levels [][]int
 	if s.controller != nil {
 		levels = make([][]int, s.controller.NumLevels())
 	}
-	s.st = &state{
-		memtable: memtable.New(0),
-		levels:   levels,
-		sstables: map[int]*sstable.SsTable{},
+	s.st = &state{memtable: mt, levels: levels, sstables: map[int]*sstable.SsTable{}}
+	if err := s.manifest.AddRecord(manifest.Record{Kind: manifest.KindNewMemtable, ID: 0}); err != nil {
+		return nil, err
 	}
+
 	if s.controller != nil && opts.Compaction.Interval > 0 {
 		s.startCompaction(opts.Compaction.Interval)
 	}
@@ -150,6 +169,10 @@ func (s *Storage) sstPath(id int) string {
 	return filepath.Join(s.opts.Path, fmt.Sprintf("%05d.sst", id))
 }
 
+func (s *Storage) walPath(id int) string {
+	return filepath.Join(s.opts.Path, fmt.Sprintf("%05d.wal", id))
+}
+
 func cloneSstables(m map[int]*sstable.SsTable) map[int]*sstable.SsTable {
 	n := make(map[int]*sstable.SsTable, len(m))
 	for k, v := range m {
@@ -158,10 +181,35 @@ func cloneSstables(m map[int]*sstable.SsTable) map[int]*sstable.SsTable {
 	return n
 }
 
-// Put inserts or overwrites a key.
-func (s *Storage) Put(k, v []byte) error {
+// WriteBatch is an ordered group of writes applied atomically by Write.
+type WriteBatch struct {
+	ops []writeOp
+}
+
+type writeOp struct {
+	key, value []byte
+}
+
+// Put stages an insert/overwrite.
+func (b *WriteBatch) Put(key, value []byte) {
+	b.ops = append(b.ops, writeOp{key: key, value: value})
+}
+
+// Delete stages a tombstone (empty value).
+func (b *WriteBatch) Delete(key []byte) {
+	b.ops = append(b.ops, writeOp{key: key, value: []byte{}})
+}
+
+// Write applies all operations of b under one lock: each is logged to the active
+// memtable's WAL then inserted, so no reader observes a partial batch.
+func (s *Storage) Write(b *WriteBatch) error {
 	s.mu.Lock()
-	s.st.memtable.Put(k, v)
+	for _, op := range b.ops {
+		if err := s.st.memtable.Put(op.key, op.value); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+	}
 	full := s.st.memtable.ApproximateSize() >= s.opts.TargetSSTSize
 	s.mu.Unlock()
 	if full {
@@ -170,9 +218,18 @@ func (s *Storage) Put(k, v []byte) error {
 	return nil
 }
 
+// Put inserts or overwrites a key.
+func (s *Storage) Put(k, v []byte) error {
+	b := &WriteBatch{}
+	b.Put(k, v)
+	return s.Write(b)
+}
+
 // Delete writes a tombstone for the key.
 func (s *Storage) Delete(k []byte) error {
-	return s.Put(k, []byte{})
+	b := &WriteBatch{}
+	b.Delete(k)
+	return s.Write(b)
 }
 
 // getFromSST returns (found, value) for k in one SST, consulting the bloom
@@ -299,28 +356,38 @@ func (s *Storage) Scan(lower, upper []byte) (iterator.StorageIterator, error) {
 	return newFusedIterator(lsmIt), nil
 }
 
-// ForceFreezeMemtable turns the active memtable immutable and installs a fresh one.
+// ForceFreezeMemtable turns the active memtable immutable and installs a fresh
+// WAL-backed one, recording the new memtable in the manifest.
 func (s *Storage) ForceFreezeMemtable() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.st.memtable.IsEmpty() {
 		return nil
 	}
+	if err := s.st.memtable.SyncWAL(); err != nil {
+		return err
+	}
+	newID := s.allocID()
+	mt, err := memtable.NewWithWAL(newID, s.walPath(newID), s.opts.SyncWrites)
+	if err != nil {
+		return err
+	}
 	old := s.st.memtable
 	newImm := make([]*memtable.Memtable, 0, len(s.st.immMemtables)+1)
 	newImm = append(newImm, old)
 	newImm = append(newImm, s.st.immMemtables...)
 	s.st = &state{
-		memtable:     memtable.New(s.allocID()),
+		memtable:     mt,
 		immMemtables: newImm,
 		l0:           s.st.l0,
 		levels:       s.st.levels,
 		sstables:     s.st.sstables,
 	}
-	return nil
+	return s.manifest.AddRecord(manifest.Record{Kind: manifest.KindNewMemtable, ID: newID})
 }
 
-// ForceFlushNextImmMemtable flushes the oldest immutable memtable to an L0 SST.
+// ForceFlushNextImmMemtable flushes the oldest immutable memtable to an L0 SST
+// whose id is the memtable's id, records the flush, and deletes the WAL.
 func (s *Storage) ForceFlushNextImmMemtable() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -329,8 +396,8 @@ func (s *Storage) ForceFlushNextImmMemtable() error {
 	}
 	flushIdx := len(s.st.immMemtables) - 1
 	target := s.st.immMemtables[flushIdx]
+	id := target.ID()
 
-	id := s.allocID()
 	builder := sstable.NewBuilder(s.opts.BlockSize)
 	it := target.Iter(nil, nil)
 	for it.IsValid() {
@@ -353,14 +420,30 @@ func (s *Storage) ForceFlushNextImmMemtable() error {
 		levels:       s.st.levels,
 		sstables:     newSstables,
 	}
+	if err := s.manifest.AddRecord(manifest.Record{Kind: manifest.KindFlush, ID: id}); err != nil {
+		return err
+	}
+	target.CloseWAL()
+	os.Remove(target.WALPath())
 	return nil
 }
 
-// Close stops background compaction and releases all SST file handles.
+// Close stops background compaction, syncs and closes the active WAL and
+// manifest, and releases SST file handles.
 func (s *Storage) Close() error {
 	s.stopCompaction()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.st.memtable != nil {
+		s.st.memtable.SyncWAL()
+		s.st.memtable.CloseWAL()
+	}
+	for _, m := range s.st.immMemtables {
+		m.CloseWAL()
+	}
+	if s.manifest != nil {
+		s.manifest.Close()
+	}
 	for _, sst := range s.st.sstables {
 		sst.Close()
 	}

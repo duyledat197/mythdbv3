@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"mythdb/internal/iterator"
+	"mythdb/internal/manifest"
 	"mythdb/internal/sstable"
 )
 
@@ -119,6 +120,20 @@ func (s *Storage) runOnceCompaction() (bool, error) {
 		l0:           newL0,
 		levels:       newLevels,
 		sstables:     newSstables,
+	}
+	// Record the new layout before releasing the lock and before deleting old
+	// files, so a crash mid-delete still recovers to the post-compaction state
+	// and manifest writes stay serialized with freeze/flush.
+	if err := s.manifest.AddRecord(manifest.Record{
+		Kind:       manifest.KindCompaction,
+		UpperLevel: task.UpperLevel,
+		UpperIDs:   task.UpperIDs,
+		LowerLevel: task.LowerLevel,
+		LowerIDs:   task.LowerIDs,
+		NewIDs:     newIDs,
+	}); err != nil {
+		s.mu.Unlock()
+		return false, err
 	}
 	s.mu.Unlock()
 
