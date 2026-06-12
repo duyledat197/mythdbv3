@@ -135,6 +135,9 @@ func (s *Storage) snapshot() *state {
 }
 
 // allocID hands out a unique, monotonically increasing id for memtables and SSTs.
+// It uses a dedicated idMu so it can be called either with or without the main
+// mu held. Lock ordering is always mu -> idMu (never the reverse); callers must
+// not acquire mu while already holding idMu.
 func (s *Storage) allocID() int {
 	s.idMu.Lock()
 	defer s.idMu.Unlock()

@@ -2,6 +2,7 @@ package lsm
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"time"
 
@@ -161,7 +162,13 @@ func (s *Storage) compactionLoop(interval time.Duration) {
 		case <-ticker.C:
 			for {
 				did, err := s.runOnceCompaction()
-				if err != nil || !did {
+				if err != nil {
+					// A transient compaction error must not kill the loop;
+					// log it and retry on the next tick.
+					log.Printf("lsm: background compaction error: %v", err)
+					break
+				}
+				if !did {
 					break
 				}
 			}

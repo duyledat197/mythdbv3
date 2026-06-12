@@ -175,6 +175,25 @@ func TestLeveledBackgroundCompaction(t *testing.T) {
 			t.Fatalf("get %q -> %q ok=%v", k, v, ok)
 		}
 	}
+
+	// A full Scan after data has propagated into levels must yield every key in
+	// ascending order exactly once (exercises the per-level SstConcatIterator).
+	it, err := s.Scan(nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for it.IsValid() {
+		want := fmt.Sprintf("key%05d", count)
+		if string(it.Key()) != want {
+			t.Fatalf("scan at %d got %q want %q", count, it.Key(), want)
+		}
+		count++
+		it.Next()
+	}
+	if count != 180 {
+		t.Fatalf("scan after leveled compaction yielded %d keys, want 180", count)
+	}
 }
 
 func TestCloseStopsBackgroundGoroutine(t *testing.T) {
