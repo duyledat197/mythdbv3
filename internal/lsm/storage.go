@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"mythdb/internal/iterator"
+	"mythdb/internal/key"
 	"mythdb/internal/memtable"
 	"mythdb/internal/sstable"
 )
@@ -92,7 +93,7 @@ func (s *Storage) Get(k []byte) ([]byte, bool, error) {
 		if err != nil {
 			return nil, false, err
 		}
-		if it.IsValid() && string(it.Key()) == string(k) {
+		if it.IsValid() && key.Compare(it.Key(), k) == 0 {
 			return resolve(it.Value())
 		}
 	}
