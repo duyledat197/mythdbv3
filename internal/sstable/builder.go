@@ -99,4 +99,3 @@ func (b *Builder) Build(id int, path string) (*SsTable, error) {
 
 // EstimatedSize approximates the bytes written so far (finished data blocks).
 func (b *Builder) EstimatedSize() int { return len(b.data) }
-
