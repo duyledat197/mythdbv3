@@ -1,12 +1,14 @@
 package lsm
 
 import (
+	"bytes"
 	"fmt"
 	"log"
 	"os"
 	"time"
 
 	"mythdb/internal/iterator"
+	"mythdb/internal/key"
 	"mythdb/internal/manifest"
 	"mythdb/internal/sstable"
 )
@@ -14,7 +16,7 @@ import (
 // doCompact merges the given input SST ids (ordered newest-first) into new
 // SSTs, splitting by the target SST size. When toBottomLevel is true, entries
 // with an empty value (tombstones) are dropped.
-func (s *Storage) doCompact(inputIDs []int, toBottomLevel bool) ([]*sstable.SsTable, error) {
+func (s *Storage) doCompact(inputIDs []int, toBottomLevel bool, watermark uint64) ([]*sstable.SsTable, error) {
 	st := s.snapshot()
 
 	var iters []iterator.StorageIterator
@@ -47,17 +49,45 @@ func (s *Storage) doCompact(inputIDs []int, toBottomLevel bool) ([]*sstable.SsTa
 		return nil
 	}
 
-	_ = toBottomLevel // Week 3B uses this with the watermark to GC old versions.
+	// effWatermark drives GC only at the bottom level; above it, keep all versions.
+	effWatermark := uint64(0)
+	if toBottomLevel {
+		effWatermark = watermark
+	}
+	var lastUser []byte
+	keptBelow := false // already kept the newest <= effWatermark version for lastUser
 	for merged.IsValid() {
 		k := merged.Key()
 		v := merged.Value()
-		if builder == nil {
-			builder = sstable.NewBuilder(s.opts.BlockSize)
+		user := key.UserKey(k)
+		ts := key.Timestamp(k)
+		if !bytes.Equal(user, lastUser) {
+			lastUser = append([]byte(nil), user...)
+			keptBelow = false
 		}
-		builder.Add(k, v)
-		if int64(builder.EstimatedSize()) >= s.opts.TargetSSTSize {
-			if err := flush(); err != nil {
-				return nil, err
+
+		keep := false
+		if ts > effWatermark {
+			keep = true // a reader above the watermark may still need this version
+		} else if !keptBelow {
+			keptBelow = true
+			// Newest version at or below the watermark: keep it unless it is a
+			// tombstone (nothing below needs it at the bottom level).
+			if len(v) != 0 {
+				keep = true
+			}
+		}
+		// else: an older version <= watermark; reclaim it.
+
+		if keep {
+			if builder == nil {
+				builder = sstable.NewBuilder(s.opts.BlockSize)
+			}
+			builder.Add(k, v)
+			if int64(builder.EstimatedSize()) >= s.opts.TargetSSTSize {
+				if err := flush(); err != nil {
+					return nil, err
+				}
 			}
 		}
 		if err := merged.Next(); err != nil {
@@ -90,7 +120,8 @@ func (s *Storage) runOnceCompaction() (bool, error) {
 	}
 
 	inputIDs := task.InputIDs()
-	newSSTs, err := s.doCompact(inputIDs, task.ToBottom)
+	watermark := s.mvcc.watermark()
+	newSSTs, err := s.doCompact(inputIDs, task.ToBottom, watermark)
 	if err != nil {
 		return false, err
 	}
