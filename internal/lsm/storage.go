@@ -96,8 +96,31 @@ func buildController(c CompactionOptions) compaction.Controller {
 	}
 }
 
-// newLeveledController is implemented in Task 6 (leveled compaction).
-func newLeveledController(c CompactionOptions) compaction.Controller { return nil }
+// newLeveledController builds a leveled controller, filling in defaults.
+func newLeveledController(c CompactionOptions) compaction.Controller {
+	maxLevels := c.MaxLevels
+	if maxLevels == 0 {
+		maxLevels = 4
+	}
+	trigger := c.L0CompactionTrigger
+	if trigger == 0 {
+		trigger = 4
+	}
+	mult := c.LevelSizeMultiplier
+	if mult == 0 {
+		mult = 10
+	}
+	base := c.BaseLevelSizeBytes
+	if base == 0 {
+		base = 16 << 20
+	}
+	return &compaction.Leveled{
+		MaxLevels:  maxLevels,
+		L0Trigger:  trigger,
+		Multiplier: mult,
+		BaseBytes:  base,
+	}
+}
 
 func (s *Storage) snapshot() *state {
 	s.mu.RLock()
