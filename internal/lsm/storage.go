@@ -2,6 +2,7 @@
 package lsm
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -444,18 +445,18 @@ func (s *Storage) Close() error {
 	s.stopCompaction()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	var errs []error
 	if s.st.memtable != nil {
-		s.st.memtable.SyncWAL()
-		s.st.memtable.CloseWAL()
+		errs = append(errs, s.st.memtable.SyncWAL(), s.st.memtable.CloseWAL())
 	}
 	for _, m := range s.st.immMemtables {
-		m.CloseWAL()
+		errs = append(errs, m.CloseWAL())
 	}
 	if s.manifest != nil {
-		s.manifest.Close()
+		errs = append(errs, s.manifest.Close())
 	}
 	for _, sst := range s.st.sstables {
-		sst.Close()
+		errs = append(errs, sst.Close())
 	}
-	return nil
+	return errors.Join(errs...)
 }

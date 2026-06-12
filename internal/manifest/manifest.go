@@ -21,13 +21,15 @@ const (
 
 // Record is one structural change. Fields not relevant to a kind stay zero.
 type Record struct {
-	Kind       RecordKind `json:"kind"`
-	ID         int        `json:"id,omitempty"`
-	UpperLevel int        `json:"upper_level,omitempty"`
-	UpperIDs   []int      `json:"upper_ids,omitempty"`
-	LowerLevel int        `json:"lower_level,omitempty"`
-	LowerIDs   []int      `json:"lower_ids,omitempty"`
-	NewIDs     []int      `json:"new_ids,omitempty"`
+	Kind RecordKind `json:"kind"`
+	ID   int        `json:"id,omitempty"`
+	// Level fields are NOT omitempty: 0 is a valid level index (an L0 source),
+	// so it must be serialized explicitly rather than dropped.
+	UpperLevel int   `json:"upper_level"`
+	UpperIDs   []int `json:"upper_ids,omitempty"`
+	LowerLevel int   `json:"lower_level"`
+	LowerIDs   []int `json:"lower_ids,omitempty"`
+	NewIDs     []int `json:"new_ids,omitempty"`
 }
 
 // Manifest appends records to a file.

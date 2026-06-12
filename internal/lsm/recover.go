@@ -2,7 +2,10 @@ package lsm
 
 import (
 	"os"
+	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 
 	"mythdb/internal/manifest"
 	"mythdb/internal/memtable"
@@ -98,6 +101,12 @@ func (s *Storage) recover(manifestPath string) error {
 		if err != nil {
 			return err
 		}
+		if mt.IsEmpty() {
+			// A frozen-but-empty memtable carries no data; drop it so we don't
+			// flush an empty SST. Its WAL becomes an orphan, cleaned up below.
+			mt.CloseWAL()
+			continue
+		}
 		imm = append(imm, mt)
 	}
 
@@ -119,12 +128,44 @@ func (s *Storage) recover(manifestPath string) error {
 		levels:       levels,
 		sstables:     sstables,
 	}
+
+	// Remove SST/WAL files no longer referenced by the recovered state (e.g. a
+	// superseded SST whose deletion was interrupted by a crash, or a flushed/
+	// empty memtable's leftover WAL).
+	keepWAL := map[int]struct{}{activeID: {}}
+	for _, mt := range imm {
+		keepWAL[mt.ID()] = struct{}{}
+	}
+	keepSST := make(map[int]struct{}, len(openIDs))
+	for _, id := range openIDs {
+		keepSST[id] = struct{}{}
+	}
+	s.deleteOrphans(keepWAL, keepSST)
 	return nil
 }
 
-// walExists reports whether the WAL file for the given id is present on disk.
-// Used during recovery to confirm an unflushed memtable's WAL exists.
-func walExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
+// deleteOrphans removes *.wal / *.sst files in the data directory whose id is
+// not referenced by the recovered state. Best-effort: errors are ignored.
+func (s *Storage) deleteOrphans(keepWAL, keepSST map[int]struct{}) {
+	entries, err := os.ReadDir(s.opts.Path)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		switch {
+		case strings.HasSuffix(name, ".wal"):
+			if id, err := strconv.Atoi(strings.TrimSuffix(name, ".wal")); err == nil {
+				if _, keep := keepWAL[id]; !keep {
+					os.Remove(filepath.Join(s.opts.Path, name))
+				}
+			}
+		case strings.HasSuffix(name, ".sst"):
+			if id, err := strconv.Atoi(strings.TrimSuffix(name, ".sst")); err == nil {
+				if _, keep := keepSST[id]; !keep {
+					os.Remove(filepath.Join(s.opts.Path, name))
+				}
+			}
+		}
+	}
 }
