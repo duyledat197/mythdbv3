@@ -1,0 +1,4 @@
+# Build artifacts
+*.sst
+/data/
+/tmp/
