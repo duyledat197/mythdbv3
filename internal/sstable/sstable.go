@@ -18,6 +18,7 @@ type SsTable struct {
 	path      string
 	id        int
 	size      int64
+	maxTs     uint64
 	blockMeta []BlockMeta
 	bloom     *bloom.Bloom
 	firstKey  []byte
@@ -36,7 +37,7 @@ func Open(id int, path string) (*SsTable, error) {
 		return nil, err
 	}
 	size := info.Size()
-	if size < 12 {
+	if size < 20 {
 		f.Close()
 		return nil, fmt.Errorf("sstable: file too small")
 	}
@@ -55,7 +56,13 @@ func Open(id int, path string) (*SsTable, error) {
 		return nil, err
 	}
 	bloomOff := int64(binary.LittleEndian.Uint32(bloomOffBuf))
-	bloomBuf, err := read(bloomOff, size-4-bloomOff)
+	maxTsBuf, err := read(size-12, 8)
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	maxTs := binary.BigEndian.Uint64(maxTsBuf)
+	bloomBuf, err := read(bloomOff, (size-12)-bloomOff)
 	if err != nil {
 		f.Close()
 		return nil, err
@@ -93,7 +100,7 @@ func Open(id int, path string) (*SsTable, error) {
 		return nil, err
 	}
 
-	t := &SsTable{file: f, path: path, id: id, size: size, blockMeta: metas, bloom: bl}
+	t := &SsTable{file: f, path: path, id: id, size: size, maxTs: maxTs, blockMeta: metas, bloom: bl}
 	if len(metas) > 0 {
 		t.firstKey = metas[0].FirstKey
 		t.lastKey = metas[len(metas)-1].LastKey
@@ -107,6 +114,9 @@ func (t *SsTable) ID() int { return t.id }
 // Size returns the on-disk file size in bytes.
 func (t *SsTable) Size() int64 { return t.size }
 
+// MaxTs returns the maximum timestamp of any key in the table.
+func (t *SsTable) MaxTs() uint64 { return t.maxTs }
+
 // NumBlocks returns the number of data blocks.
 func (t *SsTable) NumBlocks() int { return len(t.blockMeta) }
 
@@ -114,8 +124,10 @@ func (t *SsTable) NumBlocks() int { return len(t.blockMeta) }
 func (t *SsTable) FirstKey() []byte { return t.firstKey }
 func (t *SsTable) LastKey() []byte  { return t.lastKey }
 
-// MayContain consults the bloom filter for a key.
-func (t *SsTable) MayContain(k []byte) bool { return t.bloom.MayContain(bloom.Hash(k)) }
+// MayContain consults the bloom filter for a user key.
+func (t *SsTable) MayContain(userKey []byte) bool {
+	return t.bloom.MayContain(bloom.Hash(userKey))
+}
 
 // Close releases the underlying file handle.
 func (t *SsTable) Close() error { return t.file.Close() }

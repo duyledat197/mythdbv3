@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"testing"
+
+	"mythdb/internal/key"
 )
 
 func buildSST(t *testing.T, n int) *SsTable {
@@ -12,9 +14,9 @@ func buildSST(t *testing.T, n int) *SsTable {
 	path := filepath.Join(dir, "1.sst")
 	b := NewBuilder(64) // small blocks to force multiple blocks
 	for i := 0; i < n; i++ {
-		k := []byte(fmt.Sprintf("key%05d", i))
+		uk := []byte(fmt.Sprintf("key%05d", i))
 		v := []byte(fmt.Sprintf("val%05d", i))
-		b.Add(k, v)
+		b.Add(key.Encode(uk, uint64(i+1)), v)
 	}
 	sst, err := b.Build(1, path)
 	if err != nil {
@@ -32,9 +34,10 @@ func TestSSTBuildAndScan(t *testing.T) {
 	}
 	count := 0
 	for it.IsValid() {
-		want := fmt.Sprintf("key%05d", count)
-		if string(it.Key()) != want {
-			t.Fatalf("at %d got %q want %q", count, it.Key(), want)
+		wantUser := fmt.Sprintf("key%05d", count)
+		gotUser := string(key.UserKey(it.Key()))
+		if gotUser != wantUser {
+			t.Fatalf("at %d got user key %q want %q", count, gotUser, wantUser)
 		}
 		count++
 		if err := it.Next(); err != nil {
@@ -49,11 +52,12 @@ func TestSSTBuildAndScan(t *testing.T) {
 func TestSSTSeekAcrossBlocks(t *testing.T) {
 	sst := buildSST(t, 100)
 	defer sst.Close()
-	it, err := NewIterAndSeekToKey(sst, []byte("key00050"))
+	seekKey := key.Encode([]byte("key00050"), 51)
+	it, err := NewIterAndSeekToKey(sst, seekKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !it.IsValid() || string(it.Key()) != "key00050" {
+	if !it.IsValid() || string(key.UserKey(it.Key())) != "key00050" {
 		t.Fatalf("seek -> %q", it.Key())
 	}
 	if string(it.Value()) != "val00050" {
@@ -70,14 +74,16 @@ func TestSSTReopenFromDisk(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reopened.Close()
+	// MayContain takes a user key.
 	if !reopened.MayContain([]byte("key00010")) {
 		t.Fatal("bloom lost a present key after reopen")
 	}
-	it, err := NewIterAndSeekToKey(reopened, []byte("key00049"))
+	seekKey := key.Encode([]byte("key00049"), 50)
+	it, err := NewIterAndSeekToKey(reopened, seekKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !it.IsValid() || string(it.Key()) != "key00049" {
+	if !it.IsValid() || string(key.UserKey(it.Key())) != "key00049" {
 		t.Fatalf("reopened seek -> %q", it.Key())
 	}
 }

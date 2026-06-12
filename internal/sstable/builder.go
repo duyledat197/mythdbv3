@@ -7,6 +7,7 @@ import (
 
 	"mythdb/internal/block"
 	"mythdb/internal/bloom"
+	"mythdb/internal/key"
 )
 
 // Builder accumulates sorted key-value pairs and writes an SST file.
@@ -18,6 +19,7 @@ type Builder struct {
 	firstKey     []byte
 	lastKey      []byte
 	keyHashes    []uint32
+	maxTs        uint64
 }
 
 // NewBuilder creates an SST builder targeting blockSize-byte data blocks.
@@ -30,7 +32,10 @@ func NewBuilder(blockSize int) *Builder {
 
 // Add appends a key-value pair. Keys must arrive in ascending order.
 func (b *Builder) Add(k, v []byte) {
-	b.keyHashes = append(b.keyHashes, bloom.Hash(k))
+	b.keyHashes = append(b.keyHashes, bloom.Hash(key.UserKey(k)))
+	if ts := key.Timestamp(k); ts > b.maxTs {
+		b.maxTs = ts
+	}
 	if b.firstKey == nil {
 		b.firstKey = append([]byte(nil), k...)
 	}
@@ -80,6 +85,9 @@ func (b *Builder) Build(id int, path string) (*SsTable, error) {
 	bl := bloom.Build(b.keyHashes, bloom.BitsPerKey(len(b.keyHashes), 0.01))
 	bloomOffset := len(buf)
 	buf = append(buf, bl.Encode()...)
+	maxTsBuf := make([]byte, 8)
+	binary.BigEndian.PutUint64(maxTsBuf, b.maxTs)
+	buf = append(buf, maxTsBuf...)
 	binary.LittleEndian.PutUint32(off4, uint32(bloomOffset))
 	buf = append(buf, off4...)
 
@@ -109,6 +117,7 @@ func (b *Builder) Build(id int, path string) (*SsTable, error) {
 		path:      path,
 		id:        id,
 		size:      int64(len(buf)),
+		maxTs:     b.maxTs,
 		blockMeta: b.meta,
 		bloom:     bl,
 		firstKey:  b.firstKey,

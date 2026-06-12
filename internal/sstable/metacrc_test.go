@@ -13,7 +13,7 @@ func TestMetaChecksumRoundTrip(t *testing.T) {
 	path := filepath.Join(dir, "1.sst")
 	b := NewBuilder(256)
 	for i := 0; i < 40; i++ {
-		b.Add([]byte(fmt.Sprintf("key%03d", i)), []byte("v"))
+		b.Add([]byte(fmt.Sprintf("key%05d", i)), []byte("v"))
 	}
 	if _, err := b.Build(1, path); err != nil {
 		t.Fatal(err)
@@ -30,7 +30,7 @@ func TestMetaChecksumDetectsCorruption(t *testing.T) {
 	path := filepath.Join(dir, "1.sst")
 	b := NewBuilder(256)
 	for i := 0; i < 40; i++ {
-		b.Add([]byte(fmt.Sprintf("key%03d", i)), []byte("v"))
+		b.Add([]byte(fmt.Sprintf("key%05d", i)), []byte("v"))
 	}
 	sst, _ := b.Build(1, path)
 	sst.Close()

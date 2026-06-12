@@ -30,12 +30,22 @@ func Encode(userKey []byte, ts uint64) []byte {
 }
 
 // UserKey returns the user-key portion of an encoded key.
+// If the key is shorter than tsLen bytes it is treated as a raw (unencoded)
+// user key and returned as-is — this supports the pre-MVCC flush path where
+// keys have not yet been encoded by the write path.
 func UserKey(encoded []byte) []byte {
+	if len(encoded) < tsLen {
+		return encoded
+	}
 	return encoded[:len(encoded)-tsLen]
 }
 
 // Timestamp returns the decoded timestamp of an encoded key.
+// Returns 0 for keys shorter than tsLen bytes (unencoded keys).
 func Timestamp(encoded []byte) uint64 {
+	if len(encoded) < tsLen {
+		return 0
+	}
 	return ^binary.BigEndian.Uint64(encoded[len(encoded)-tsLen:])
 }
 
