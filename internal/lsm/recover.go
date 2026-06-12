@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"mythdb/internal/key"
 	"mythdb/internal/manifest"
 	"mythdb/internal/memtable"
 	"mythdb/internal/sstable"
@@ -128,6 +129,24 @@ func (s *Storage) recover(manifestPath string) error {
 		levels:       levels,
 		sstables:     sstables,
 	}
+
+	// Restore the commit-timestamp counter to the maximum timestamp on disk.
+	var maxTs uint64
+	for _, sst := range sstables {
+		if t := sst.MaxTs(); t > maxTs {
+			maxTs = t
+		}
+	}
+	for _, mt := range imm {
+		mtIt := mt.Iter(nil, nil)
+		for mtIt.IsValid() {
+			if t := key.Timestamp(mtIt.Key()); t > maxTs {
+				maxTs = t
+			}
+			mtIt.Next()
+		}
+	}
+	s.mvcc = newMvcc(maxTs)
 
 	// Remove SST/WAL files no longer referenced by the recovered state (e.g. a
 	// superseded SST whose deletion was interrupted by a crash, or a flushed/

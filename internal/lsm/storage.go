@@ -2,6 +2,7 @@
 package lsm
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -59,6 +60,7 @@ type Storage struct {
 
 	controller compaction.Controller
 	manifest   *manifest.Manifest
+	mvcc       *mvcc
 
 	stopCh chan struct{}
 	wg     sync.WaitGroup
@@ -93,6 +95,7 @@ func Open(opts Options) (*Storage, error) {
 			return nil, err
 		}
 		s.manifest = man
+		s.mvcc = newMvcc(0)
 		mt, err := memtable.NewWithWAL(0, s.walPath(0), opts.SyncWrites)
 		if err != nil {
 			return nil, err
@@ -209,14 +212,15 @@ func (b *WriteBatch) Delete(key []byte) {
 	b.ops = append(b.ops, writeOp{key: key, value: []byte{}})
 }
 
-// Write applies all operations of b under one lock: each is logged to the active
-// memtable's WAL then inserted, so no reader observes a partial batch.
+// Write applies all operations of b under one lock at a single commit timestamp:
+// each op is encoded with that timestamp, logged to the WAL, and inserted.
 func (s *Storage) Write(b *WriteBatch) error {
+	s.mu.Lock()
+	commitTs := s.mvcc.nextTs()
 	entries := make([]memtable.Entry, len(b.ops))
 	for i, op := range b.ops {
-		entries[i] = memtable.Entry{Key: op.key, Value: op.value}
+		entries[i] = memtable.Entry{Key: key.Encode(op.key, commitTs), Value: op.value}
 	}
-	s.mu.Lock()
 	if err := s.st.memtable.PutBatch(entries); err != nil {
 		s.mu.Unlock()
 		return err
@@ -243,73 +247,6 @@ func (s *Storage) Delete(k []byte) error {
 	return s.Write(b)
 }
 
-// getFromSST returns (found, value) for k in one SST, consulting the bloom
-// filter first. found==true with an empty value means a tombstone.
-func getFromSST(sst *sstable.SsTable, k []byte) (bool, []byte, error) {
-	if !sst.MayContain(k) {
-		return false, nil, nil
-	}
-	it, err := sstable.NewIterAndSeekToKey(sst, k)
-	if err != nil {
-		return false, nil, err
-	}
-	if it.IsValid() && key.Compare(it.Key(), k) == 0 {
-		return true, it.Value(), nil
-	}
-	return false, nil, nil
-}
-
-// Get returns the value for k and whether it exists (tombstones read as absent).
-func (s *Storage) Get(k []byte) ([]byte, bool, error) {
-	st := s.snapshot()
-
-	if v, ok := st.memtable.Get(k); ok {
-		return resolve(v)
-	}
-	for _, m := range st.immMemtables {
-		if v, ok := m.Get(k); ok {
-			return resolve(v)
-		}
-	}
-
-	// L0: each SST may overlap; check newest first.
-	for _, id := range st.l0 {
-		found, v, err := getFromSST(st.sstables[id], k)
-		if err != nil {
-			return nil, false, err
-		}
-		if found {
-			return resolve(v)
-		}
-	}
-
-	// Levels: each level is a sorted, non-overlapping run.
-	for _, level := range st.levels {
-		for _, id := range level {
-			sst := st.sstables[id]
-			if key.Compare(k, sst.FirstKey()) < 0 || key.Compare(k, sst.LastKey()) > 0 {
-				continue
-			}
-			found, v, err := getFromSST(sst, k)
-			if err != nil {
-				return nil, false, err
-			}
-			if found {
-				return resolve(v)
-			}
-		}
-	}
-	return nil, false, nil
-}
-
-// resolve maps a stored value to the Get contract: empty value == deleted.
-func resolve(v []byte) ([]byte, bool, error) {
-	if len(v) == 0 {
-		return nil, false, nil
-	}
-	return v, true, nil
-}
-
 func seekSST(sst *sstable.SsTable, lower []byte) (iterator.StorageIterator, error) {
 	if lower == nil {
 		return sstable.NewIterAndSeekToFirst(sst)
@@ -317,21 +254,29 @@ func seekSST(sst *sstable.SsTable, lower []byte) (iterator.StorageIterator, erro
 	return sstable.NewIterAndSeekToKey(sst, lower)
 }
 
-// Scan returns an iterator over [lower, upper). nil bounds are unbounded.
-func (s *Storage) Scan(lower, upper []byte) (iterator.StorageIterator, error) {
+// buildMvccScan builds a fused MVCC iterator over the user-key range [lower, upper)
+// at readTs. lower/upper are user keys; nil means unbounded.
+func (s *Storage) buildMvccScan(lower, upper []byte, readTs uint64) (iterator.StorageIterator, error) {
 	st := s.snapshot()
 
-	// Memtables (newest first) as one merge.
-	memIters := []iterator.StorageIterator{st.memtable.Iter(lower, upper)}
+	var encLower []byte
+	if lower != nil {
+		encLower = key.Encode(lower, key.TsRangeBegin)
+	}
+	var encUpper []byte
+	if upper != nil {
+		encUpper = key.Encode(upper, key.TsRangeBegin)
+	}
+
+	memIters := []iterator.StorageIterator{st.memtable.Iter(encLower, encUpper)}
 	for _, m := range st.immMemtables {
-		memIters = append(memIters, m.Iter(lower, upper))
+		memIters = append(memIters, m.Iter(encLower, encUpper))
 	}
 	memMerge := iterator.NewMergeIterator(memIters)
 
-	// L0 SSTs (newest first) as one merge.
 	var l0Iters []iterator.StorageIterator
 	for _, id := range st.l0 {
-		it, err := seekSST(st.sstables[id], lower)
+		it, err := seekSST(st.sstables[id], encLower)
 		if err != nil {
 			return nil, err
 		}
@@ -339,7 +284,6 @@ func (s *Storage) Scan(lower, upper []byte) (iterator.StorageIterator, error) {
 	}
 	l0Merge := iterator.NewMergeIterator(l0Iters)
 
-	// Combine tiers newest -> oldest: memtables, L0, then each level concat.
 	allIters := []iterator.StorageIterator{memMerge, l0Merge}
 	for _, level := range st.levels {
 		tables := make([]*sstable.SsTable, len(level))
@@ -348,23 +292,41 @@ func (s *Storage) Scan(lower, upper []byte) (iterator.StorageIterator, error) {
 		}
 		var ci iterator.StorageIterator
 		var err error
-		if lower == nil {
+		if encLower == nil {
 			ci, err = iterator.NewConcatIterAndSeekToFirst(tables)
 		} else {
-			ci, err = iterator.NewConcatIterAndSeekToKey(tables, lower)
+			ci, err = iterator.NewConcatIterAndSeekToKey(tables, encLower)
 		}
 		if err != nil {
 			return nil, err
 		}
 		allIters = append(allIters, ci)
 	}
-	combined := iterator.NewMergeIterator(allIters)
+	merged := iterator.NewMergeIterator(allIters)
 
-	lsmIt, err := newLsmIterator(combined, upper)
+	mv, err := newMvccIterator(merged, readTs, upper)
 	if err != nil {
 		return nil, err
 	}
-	return newFusedIterator(lsmIt), nil
+	return newFusedIterator(mv), nil
+}
+
+// Get returns the value for k at the latest committed timestamp.
+func (s *Storage) Get(k []byte) ([]byte, bool, error) {
+	readTs := s.mvcc.latestTs()
+	it, err := s.buildMvccScan(k, nil, readTs)
+	if err != nil {
+		return nil, false, err
+	}
+	if it.IsValid() && bytes.Equal(it.Key(), k) {
+		return append([]byte(nil), it.Value()...), true, nil
+	}
+	return nil, false, nil
+}
+
+// Scan returns an iterator over [lower, upper) at the latest committed timestamp.
+func (s *Storage) Scan(lower, upper []byte) (iterator.StorageIterator, error) {
+	return s.buildMvccScan(lower, upper, s.mvcc.latestTs())
 }
 
 // ForceFreezeMemtable turns the active memtable immutable and installs a fresh

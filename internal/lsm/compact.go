@@ -47,15 +47,10 @@ func (s *Storage) doCompact(inputIDs []int, toBottomLevel bool) ([]*sstable.SsTa
 		return nil
 	}
 
+	_ = toBottomLevel // Week 3B uses this with the watermark to GC old versions.
 	for merged.IsValid() {
 		k := merged.Key()
 		v := merged.Value()
-		if toBottomLevel && len(v) == 0 {
-			if err := merged.Next(); err != nil {
-				return nil, err
-			}
-			continue
-		}
 		if builder == nil {
 			builder = sstable.NewBuilder(s.opts.BlockSize)
 		}
