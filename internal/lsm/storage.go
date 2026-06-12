@@ -53,6 +53,9 @@ type Storage struct {
 	nextID int
 
 	controller compaction.Controller
+
+	stopCh chan struct{}
+	wg     sync.WaitGroup
 }
 
 // Open initializes an empty engine. (Recovery from disk arrives in Week 2B.)
@@ -75,6 +78,9 @@ func Open(opts Options) (*Storage, error) {
 		memtable: memtable.New(0),
 		levels:   levels,
 		sstables: map[int]*sstable.SsTable{},
+	}
+	if s.controller != nil && opts.Compaction.Interval > 0 {
+		s.startCompaction(opts.Compaction.Interval)
 	}
 	return s, nil
 }
@@ -347,8 +353,9 @@ func (s *Storage) ForceFlushNextImmMemtable() error {
 	return nil
 }
 
-// Close releases all SST file handles.
+// Close stops background compaction and releases all SST file handles.
 func (s *Storage) Close() error {
+	s.stopCompaction()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, sst := range s.st.sstables {

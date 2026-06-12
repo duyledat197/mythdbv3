@@ -3,6 +3,7 @@ package lsm
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"mythdb/internal/iterator"
 	"mythdb/internal/sstable"
@@ -128,4 +129,42 @@ func (s *Storage) runOnceCompaction() (bool, error) {
 		}
 	}
 	return true, nil
+}
+
+// startCompaction launches the background compaction loop.
+func (s *Storage) startCompaction(interval time.Duration) {
+	s.stopCh = make(chan struct{})
+	s.wg.Add(1)
+	go s.compactionLoop(interval)
+}
+
+// stopCompaction signals the loop to exit and waits for it.
+func (s *Storage) stopCompaction() {
+	if s.stopCh == nil {
+		return
+	}
+	close(s.stopCh)
+	s.wg.Wait()
+	s.stopCh = nil
+}
+
+// compactionLoop runs compaction on each tick until stopped, draining all
+// available work per tick.
+func (s *Storage) compactionLoop(interval time.Duration) {
+	defer s.wg.Done()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.stopCh:
+			return
+		case <-ticker.C:
+			for {
+				did, err := s.runOnceCompaction()
+				if err != nil || !did {
+					break
+				}
+			}
+		}
+	}
 }

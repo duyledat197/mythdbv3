@@ -3,6 +3,7 @@ package lsm
 import (
 	"fmt"
 	"testing"
+	"time"
 )
 
 func newFullStorage(t *testing.T) *Storage {
@@ -112,5 +113,87 @@ func TestFullCompactionDropsTombstones(t *testing.T) {
 	}
 	if it.IsValid() {
 		t.Fatalf("expected empty scan, first key=%q", it.Key())
+	}
+}
+
+func TestLeveledBackgroundCompaction(t *testing.T) {
+	s, err := Open(Options{
+		Path:          t.TempDir(),
+		BlockSize:     256,
+		TargetSSTSize: 1024, // small so compaction output splits and levels move
+		Compaction: CompactionOptions{
+			Strategy:            "leveled",
+			MaxLevels:           3,
+			L0CompactionTrigger: 1, // drain every flushed L0 SST deterministically
+			LevelSizeMultiplier: 4,
+			BaseLevelSizeBytes:  2048,
+			Interval:            5 * time.Millisecond,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	// Write several flushed SSTs so the L0 trigger fires repeatedly.
+	for batch := 0; batch < 6; batch++ {
+		for i := 0; i < 30; i++ {
+			k := []byte(fmt.Sprintf("key%05d", batch*30+i))
+			s.Put(k, []byte(fmt.Sprintf("val%05d", batch*30+i)))
+		}
+		flushAll(t, s)
+	}
+
+	// Wait for the background goroutine to drain L0 into levels.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(s.snapshot().l0) == 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	st := s.snapshot()
+	if len(st.l0) != 0 {
+		t.Fatalf("expected L0 drained by background compaction, still %d", len(st.l0))
+	}
+	levelTotal := 0
+	for _, lv := range st.levels {
+		levelTotal += len(lv)
+	}
+	if levelTotal == 0 {
+		t.Fatal("expected SSTs to have moved into levels")
+	}
+
+	// All written keys must still be readable.
+	for i := 0; i < 180; i++ {
+		k := fmt.Sprintf("key%05d", i)
+		v, ok, err := s.Get([]byte(k))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !ok || string(v) != fmt.Sprintf("val%05d", i) {
+			t.Fatalf("get %q -> %q ok=%v", k, v, ok)
+		}
+	}
+}
+
+func TestCloseStopsBackgroundGoroutine(t *testing.T) {
+	s, err := Open(Options{
+		Path:          t.TempDir(),
+		BlockSize:     256,
+		TargetSSTSize: 1024,
+		Compaction: CompactionOptions{
+			Strategy: "leveled",
+			Interval: 5 * time.Millisecond,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Put([]byte("a"), []byte("1"))
+	flushAll(t, s)
+	// Close must return promptly and stop the goroutine (verified under -race).
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
 	}
 }

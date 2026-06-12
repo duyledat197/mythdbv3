@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"mythdb/internal/lsm"
 )
@@ -16,7 +17,15 @@ func main() {
 	}
 	defer os.RemoveAll(dir)
 
-	s, err := lsm.Open(lsm.Options{Path: dir, BlockSize: 4096, TargetSSTSize: 1 << 20})
+	s, err := lsm.Open(lsm.Options{
+		Path:          dir,
+		BlockSize:     4096,
+		TargetSSTSize: 1 << 20,
+		Compaction: lsm.CompactionOptions{
+			Strategy: "leveled",
+			Interval: 10 * time.Millisecond,
+		},
+	})
 	if err != nil {
 		log.Fatal(err)
 	}
