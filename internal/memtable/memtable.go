@@ -4,6 +4,7 @@ import (
 	"sync"
 
 	"mythdb/internal/key"
+	"mythdb/internal/wal"
 )
 
 // Memtable is a sorted in-memory table backed by a skiplist. A tombstone is a
@@ -13,6 +14,8 @@ type Memtable struct {
 	list       *skiplist
 	id         int
 	approxSize int64
+	wal        *wal.WAL
+	walPath    string
 }
 
 // New creates an empty memtable with the given id.
@@ -22,16 +25,69 @@ func New(id int) *Memtable {
 
 func (m *Memtable) ID() int { return m.id }
 
-// Put inserts or overwrites key with value.
-func (m *Memtable) Put(k, v []byte) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+// NewWithWAL creates a memtable backed by a fresh WAL at walPath.
+func NewWithWAL(id int, walPath string, syncWrites bool) (*Memtable, error) {
+	w, err := wal.Create(walPath, syncWrites)
+	if err != nil {
+		return nil, err
+	}
+	return &Memtable{list: newSkiplist(), id: id, wal: w, walPath: walPath}, nil
+}
+
+// RecoverWAL rebuilds a memtable by replaying an existing WAL, keeping it open
+// for further appends.
+func RecoverWAL(id int, walPath string, syncWrites bool) (*Memtable, error) {
+	recs, w, err := wal.Recover(walPath, syncWrites)
+	if err != nil {
+		return nil, err
+	}
+	m := &Memtable{list: newSkiplist(), id: id, wal: w, walPath: walPath}
+	for _, r := range recs {
+		m.apply(r.Key, r.Value)
+	}
+	return m, nil
+}
+
+// apply inserts into the skiplist and updates the size estimate without logging.
+func (m *Memtable) apply(k, v []byte) {
 	inserted, oldLen := m.list.put(k, v)
 	if inserted {
 		m.approxSize += int64(len(k) + len(v))
 	} else {
 		m.approxSize += int64(len(v) - oldLen)
 	}
+}
+
+// SyncWAL fsyncs the WAL if present.
+func (m *Memtable) SyncWAL() error {
+	if m.wal == nil {
+		return nil
+	}
+	return m.wal.Sync()
+}
+
+// CloseWAL closes the WAL if present.
+func (m *Memtable) CloseWAL() error {
+	if m.wal == nil {
+		return nil
+	}
+	return m.wal.Close()
+}
+
+// WALPath returns the WAL file path, or "" if the memtable has no WAL.
+func (m *Memtable) WALPath() string { return m.walPath }
+
+// Put logs to the WAL (if present) then inserts or overwrites key with value.
+func (m *Memtable) Put(k, v []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.wal != nil {
+		if err := m.wal.Put(k, v); err != nil {
+			return err
+		}
+	}
+	m.apply(k, v)
+	return nil
 }
 
 // Get returns the stored value and whether the key exists in this memtable.
