@@ -2,3 +2,5 @@
 *.sst
 /data/
 /tmp/
+# built demo binary (anchored to repo root so it doesn't shadow cmd/mythdb/)
+/mythdb
