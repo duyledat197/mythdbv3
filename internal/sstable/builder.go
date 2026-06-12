@@ -89,9 +89,14 @@ func (b *Builder) Build(id int, path string) (*SsTable, error) {
 		file:      f,
 		path:      path,
 		id:        id,
+		size:      int64(len(buf)),
 		blockMeta: b.meta,
 		bloom:     bl,
 		firstKey:  b.firstKey,
 		lastKey:   append([]byte(nil), b.lastKey...),
 	}, nil
 }
+
+// EstimatedSize approximates the bytes written so far (finished data blocks).
+func (b *Builder) EstimatedSize() int { return len(b.data) }
+

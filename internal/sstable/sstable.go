@@ -16,6 +16,7 @@ type SsTable struct {
 	file      *os.File
 	path      string
 	id        int
+	size      int64
 	blockMeta []BlockMeta
 	bloom     *bloom.Bloom
 	firstKey  []byte
@@ -81,7 +82,7 @@ func Open(id int, path string) (*SsTable, error) {
 		return nil, err
 	}
 
-	t := &SsTable{file: f, path: path, id: id, blockMeta: metas, bloom: bl}
+	t := &SsTable{file: f, path: path, id: id, size: size, blockMeta: metas, bloom: bl}
 	if len(metas) > 0 {
 		t.firstKey = metas[0].FirstKey
 		t.lastKey = metas[len(metas)-1].LastKey
@@ -91,6 +92,9 @@ func Open(id int, path string) (*SsTable, error) {
 
 // ID returns the SST id.
 func (t *SsTable) ID() int { return t.id }
+
+// Size returns the on-disk file size in bytes.
+func (t *SsTable) Size() int64 { return t.size }
 
 // NumBlocks returns the number of data blocks.
 func (t *SsTable) NumBlocks() int { return len(t.blockMeta) }
