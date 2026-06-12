@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"path/filepath"
 	"sync"
+	"time"
 
+	"mythdb/internal/compaction"
 	"mythdb/internal/iterator"
 	"mythdb/internal/key"
 	"mythdb/internal/memtable"
@@ -17,6 +19,18 @@ type Options struct {
 	Path          string // directory for SST files
 	BlockSize     int    // target block size in bytes
 	TargetSSTSize int64  // memtable freeze threshold AND target compaction SST size
+
+	Compaction CompactionOptions
+}
+
+// CompactionOptions configures background compaction. Strategy "" disables it.
+type CompactionOptions struct {
+	Strategy            string        // "", "full", or "leveled"
+	MaxLevels           int           // non-L0 levels (full defaults 1, leveled defaults 4)
+	L0CompactionTrigger int           // leveled: L0 file count that triggers L0->L1 (default 4)
+	LevelSizeMultiplier int           // leveled: size ratio between levels (default 10)
+	BaseLevelSizeBytes  int64         // leveled: bottom-level base target (default 16 MiB)
+	Interval            time.Duration // background tick; 0 disables the goroutine
 }
 
 // state is an immutable-by-convention snapshot of the engine's tiers. SSTs are
@@ -37,6 +51,8 @@ type Storage struct {
 
 	idMu   sync.Mutex
 	nextID int
+
+	controller compaction.Controller
 }
 
 // Open initializes an empty engine. (Recovery from disk arrives in Week 2B.)
@@ -47,15 +63,41 @@ func Open(opts Options) (*Storage, error) {
 	if opts.TargetSSTSize == 0 {
 		opts.TargetSSTSize = 4 << 20
 	}
-	return &Storage{
-		st: &state{
-			memtable: memtable.New(0),
-			sstables: map[int]*sstable.SsTable{},
-		},
-		opts:   opts,
-		nextID: 1,
-	}, nil
+
+	s := &Storage{opts: opts, nextID: 1}
+	s.controller = buildController(opts.Compaction)
+
+	var levels [][]int
+	if s.controller != nil {
+		levels = make([][]int, s.controller.NumLevels())
+	}
+	s.st = &state{
+		memtable: memtable.New(0),
+		levels:   levels,
+		sstables: map[int]*sstable.SsTable{},
+	}
+	return s, nil
 }
+
+// buildController constructs the compaction controller for the given options,
+// or nil when compaction is disabled.
+func buildController(c CompactionOptions) compaction.Controller {
+	switch c.Strategy {
+	case "full":
+		levels := c.MaxLevels
+		if levels == 0 {
+			levels = 1
+		}
+		return &compaction.Full{MaxLevels: levels}
+	case "leveled":
+		return newLeveledController(c)
+	default:
+		return nil
+	}
+}
+
+// newLeveledController is implemented in Task 6 (leveled compaction).
+func newLeveledController(c CompactionOptions) compaction.Controller { return nil }
 
 func (s *Storage) snapshot() *state {
 	s.mu.RLock()
