@@ -335,6 +335,19 @@ func (s *Storage) buildMvccScan(lower, upper []byte, readTs uint64) (iterator.St
 	return newFusedIterator(mv), nil
 }
 
+// Begin starts a transaction reading a consistent snapshot at the latest
+// committed timestamp.
+func (s *Storage) Begin() *Txn {
+	readTs := s.mvcc.latestTs()
+	s.mvcc.addReader(readTs)
+	return &Txn{
+		engine:    s,
+		readTs:    readTs,
+		local:     map[string][]byte{},
+		accessSet: map[uint64]struct{}{},
+	}
+}
+
 // Get returns the value for k at the latest committed timestamp.
 func (s *Storage) Get(k []byte) ([]byte, bool, error) {
 	readTs := s.mvcc.latestTs()
