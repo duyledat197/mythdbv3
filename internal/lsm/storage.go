@@ -63,8 +63,9 @@ type Storage struct {
 	wg     sync.WaitGroup
 }
 
-// Open initializes the engine. (Task 6 adds recovery from an existing MANIFEST;
-// this version always starts fresh, creating the manifest and first WAL.)
+// Open initializes the engine. If a MANIFEST already exists in opts.Path the
+// engine is recovered from it (manifest records + WALs); otherwise a fresh
+// engine is created with a new manifest and first WAL.
 func Open(opts Options) (*Storage, error) {
 	if opts.BlockSize == 0 {
 		opts.BlockSize = 4096
@@ -79,23 +80,30 @@ func Open(opts Options) (*Storage, error) {
 	if err := os.MkdirAll(opts.Path, 0o755); err != nil {
 		return nil, err
 	}
-	man, err := manifest.Create(filepath.Join(opts.Path, "MANIFEST"))
-	if err != nil {
-		return nil, err
-	}
-	s.manifest = man
+	manifestPath := filepath.Join(opts.Path, "MANIFEST")
 
-	mt, err := memtable.NewWithWAL(0, s.walPath(0), opts.SyncWrites)
-	if err != nil {
-		return nil, err
-	}
-	var levels [][]int
-	if s.controller != nil {
-		levels = make([][]int, s.controller.NumLevels())
-	}
-	s.st = &state{memtable: mt, levels: levels, sstables: map[int]*sstable.SsTable{}}
-	if err := s.manifest.AddRecord(manifest.Record{Kind: manifest.KindNewMemtable, ID: 0}); err != nil {
-		return nil, err
+	if _, err := os.Stat(manifestPath); err == nil {
+		if err := s.recover(manifestPath); err != nil {
+			return nil, err
+		}
+	} else {
+		man, err := manifest.Create(manifestPath)
+		if err != nil {
+			return nil, err
+		}
+		s.manifest = man
+		mt, err := memtable.NewWithWAL(0, s.walPath(0), opts.SyncWrites)
+		if err != nil {
+			return nil, err
+		}
+		var levels [][]int
+		if s.controller != nil {
+			levels = make([][]int, s.controller.NumLevels())
+		}
+		s.st = &state{memtable: mt, levels: levels, sstables: map[int]*sstable.SsTable{}}
+		if err := s.manifest.AddRecord(manifest.Record{Kind: manifest.KindNewMemtable, ID: 0}); err != nil {
+			return nil, err
+		}
 	}
 
 	if s.controller != nil && opts.Compaction.Interval > 0 {
