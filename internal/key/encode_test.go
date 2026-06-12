@@ -50,3 +50,24 @@ func TestRangeBeginIsNewest(t *testing.T) {
 		t.Fatalf("range-begin should be <= any real version")
 	}
 }
+
+func TestPrefixUserKeyOrdering(t *testing.T) {
+	// A shorter user key that is a prefix of a longer one must still order before
+	// it, regardless of the timestamp suffix bytes.
+	short := Encode([]byte("b"), 1)
+	long := Encode([]byte("bc"), 1)
+	if Compare(short, long) >= 0 {
+		t.Fatalf("expected b@1 < bc@1 (user key ordering), got %d", Compare(short, long))
+	}
+	// The exclusive upper bound Encode("bc", TsRangeBegin) must sort AFTER every
+	// version of "b" (so a scan [.., "bc") still includes "b")...
+	upper := Encode([]byte("bc"), TsRangeBegin)
+	if Compare(short, upper) >= 0 {
+		t.Fatalf("expected b@1 < upper-bound(bc), got %d", Compare(short, upper))
+	}
+	// ...while every version of "bc" sorts at/after that bound (so it is excluded).
+	bcVersion := Encode([]byte("bc"), 5)
+	if Compare(bcVersion, upper) < 0 {
+		t.Fatalf("expected bc@5 >= upper-bound(bc) to be excluded, got %d", Compare(bcVersion, upper))
+	}
+}

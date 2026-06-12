@@ -50,8 +50,25 @@ func Timestamp(encoded []byte) uint64 {
 }
 
 // Compare orders encoded keys: user key ascending, then timestamp descending.
+//
+// It must NOT be a plain bytes.Compare of the concatenation: a shorter user key
+// followed by the timestamp suffix can otherwise compare greater than a longer
+// user key (e.g. "b"||suffix vs "bc"||suffix, where the suffix's high byte beats
+// 'c'), which would corrupt scan ordering and bounds. So compare the user-key
+// portions first, then break ties by timestamp descending (newest first).
 func Compare(a, b []byte) int {
-	return bytes.Compare(a, b)
+	if c := bytes.Compare(UserKey(a), UserKey(b)); c != 0 {
+		return c
+	}
+	ta, tb := Timestamp(a), Timestamp(b)
+	switch {
+	case ta > tb:
+		return -1
+	case ta < tb:
+		return 1
+	default:
+		return 0
+	}
 }
 
 // CompareUserKey compares only the user-key portions of two encoded keys.

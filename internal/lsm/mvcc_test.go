@@ -85,3 +85,42 @@ func TestCommitTimestampsAreMonotonic(t *testing.T) {
 		t.Fatalf("latestTs = %d want 100", s.mvcc.latestTs())
 	}
 }
+
+func TestMVCCScanPrefixKeysOrderingAndBounds(t *testing.T) {
+	s, err := Open(Options{Path: t.TempDir(), BlockSize: 4096, TargetSSTSize: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	// "b" is a prefix of "bc": a naive bytes.Compare on encoded keys would misorder
+	// these and drop "b" from a [.., "bc") scan.
+	s.Put([]byte("a"), []byte("1"))
+	s.Put([]byte("b"), []byte("2"))
+	s.Put([]byte("bc"), []byte("3"))
+	s.Put([]byte("c"), []byte("4"))
+
+	collect := func(lower, upper []byte) []string {
+		it, err := s.Scan(lower, upper)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ks []string
+		for it.IsValid() {
+			ks = append(ks, string(it.Key()))
+			it.Next()
+		}
+		return ks
+	}
+
+	full := collect(nil, nil)
+	wantFull := []string{"a", "b", "bc", "c"}
+	if fmt.Sprint(full) != fmt.Sprint(wantFull) {
+		t.Fatalf("full scan = %v want %v", full, wantFull)
+	}
+	// Exclusive upper "bc" must include "b" but exclude "bc".
+	bounded := collect([]byte("a"), []byte("bc"))
+	wantBounded := []string{"a", "b"}
+	if fmt.Sprint(bounded) != fmt.Sprint(wantBounded) {
+		t.Fatalf("scan [a, bc) = %v want %v", bounded, wantBounded)
+	}
+}
