@@ -17,7 +17,7 @@ go test -race ./internal/lsm/              # race detector (use on lsm changes)
 go test ./internal/lsm/ -run TestName -v   # a single test (white-box; tests are in-package)
 go vet ./...
 gofmt -l internal/ cmd/                    # list unformatted files; gofmt -w to fix
-go run ./cmd/mythdb                        # end-to-end demo (put/get/delete/scan + compaction)
+go run ./cmd/mythdb                         # end-to-end demo (put/get/delete/scan + compaction)
 ```
 
 There is no build/lint config beyond Go's defaults. Always run `go test ./...`,
